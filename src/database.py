@@ -5,14 +5,37 @@ from dotenv import load_dotenv
 # Load variables from .env file
 load_dotenv()
 
+_client = None
+
+def get_db_client():
+    global _client
+    if _client is None:
+        uri = os.getenv("MONGO_URI")
+        _client = MongoClient(uri)
+    return _client
+
+def get_db():
+    db_name = os.getenv("DB_NAME", os.getenv("DATABASE_NAME", "webasthetic_leads"))
+    client = get_db_client()
+    return client[db_name]
+
+def get_collection(name: str):
+    db = get_db()
+    return db[name]
+
+def get_raw_posts_collection():
+    raw_name = os.getenv("RAW_POSTS_COLLECTION") or os.getenv("COLLECTION_NAME", "webastheticleads")
+    return get_collection(raw_name)
+
+def get_post_summaries_collection():
+    return get_collection(os.getenv("POST_SUMMARIES_COLLECTION", "post_summaries"))
+
+def get_final_table_collection():
+    return get_collection(os.getenv("FINAL_TABLE_COLLECTION", "final_table"))
+
+# Backward compatibility for existing code
 def get_db_collection():
-    uri = os.getenv("MONGO_URI")
-    db_name = os.getenv("DATABASE_NAME", "webasthetic_leads")
-    col_name = os.getenv("COLLECTION_NAME", "webastheticleads")
-    
-    client = MongoClient(uri)
-    db = client[db_name]
-    return db[col_name]
+    return get_raw_posts_collection()
 
 if __name__ == "__main__":
     # Test connection

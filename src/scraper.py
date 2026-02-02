@@ -1,23 +1,27 @@
 import asyncio
 import json
+import os
 import re
 import sys
+from datetime import datetime, date
+from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from src.database import get_db_collection 
 
 collection = get_db_collection()
 
-async def main():
+async def main(search_url: str | None = None):
     # 1. READ ARGUMENT FROM N8N
     # If n8n sends a URL, use it. Otherwise, use a default for testing.
-    if len(sys.argv) > 1:
-        search_url = sys.argv[1]
-        print(f"🔗 Received Target from n8n: {search_url}")
-    else:
-        # Fallback / Default
-        keywords = '%22looking%20for%22%20AND%20(%22web%20developer%22%20OR%20%22web%20development%20agency%22)'
-        search_url = f"https://www.linkedin.com/search/results/content/?datePosted=%22past-24h%22&keywords={keywords}"
+    if not search_url:
+        if len(sys.argv) > 1:
+            search_url = sys.argv[1]
+            print(f"🔗 Received Target from n8n: {search_url}")
+        else:
+            # Fallback / Default
+            keywords = '%22looking%20for%22%20AND%20(%22web%20developer%22%20OR%20%22web%20development%20agency%22)'
+            search_url = f"https://www.linkedin.com/search/results/content/?datePosted=%22past-24h%22&keywords={keywords}"
     # VERIFIED SCROLL JS: Mimics manual scrolling perfectly
     apex_mimic_js = """
     (async () => {
@@ -85,6 +89,12 @@ async def main():
             if not containers:
                 containers = soup.select(".occludable-update")
 
+            timezone_name = os.getenv("TIMEZONE", "UTC")
+            try:
+                today_str = datetime.now(ZoneInfo(timezone_name)).date().isoformat()
+            except Exception:
+                today_str = date.today().isoformat()
+
             leads = []
             seen_profiles = set()
 
@@ -112,7 +122,7 @@ async def main():
                         leads.append({
                             "profile_url": link,
                             "content": text,
-                            "scraped_at": "2026-01-31"
+                            "scraped_at": today_str
                         })
                         seen_profiles.add(link)
                 except:
@@ -129,6 +139,11 @@ async def main():
                 print("❌ No leads found in rendered HTML. Check if posts were expanded on screen.")
         else:
             print("❌ Critical Fail: Browser returned no HTML.")
+
+def run_selenium_scraper(search_url: str):
+    print(f"🕵️‍♂️ Starting Scraper for: {search_url}")
+    asyncio.run(main(search_url))
+
 
 if __name__ == "__main__":
     try:
