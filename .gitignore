@@ -3,10 +3,31 @@
 env/
 venv/
 
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.tmp
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
 # Secrets
 .env
+token.json
+credentials.json
+*.pem
+*.key
 
 # Project Specific
 linkedin_session/
-__pycache__/
-*.pyc
+temp_downloads/
+*.pma
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3

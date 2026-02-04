@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from groq import Groq, RateLimitError
+import requests
 
 from src.database import (
     get_final_table_collection,
@@ -55,7 +56,7 @@ OUTPUT JSON ONLY:
     return None
 
 
-def run_summarizer():
+def run_summarizer(callback_url: str | None = None):
     print("🤖 Starting Post Summarization...")
 
     timezone_name = os.getenv("TIMEZONE", "UTC")
@@ -75,62 +76,71 @@ def run_summarizer():
     tasks = list(pending_tasks)
     print(f"Found {len(tasks)} posts to summarize.")
 
-    for task in tasks:
-        master_id = task.get("_id")
-        raw_id = task.get("ref_raw_post")
+    try:
+        for task in tasks:
+            master_id = task.get("_id")
+            raw_id = task.get("ref_raw_post")
 
-        raw_post = col_raw_posts.find_one({"_id": raw_id})
-        if not raw_post:
-            print(f"⚠️ Raw post missing for {raw_id}")
-            continue
+            raw_post = col_raw_posts.find_one({"_id": raw_id})
+            if not raw_post:
+                print(f"⚠️ Raw post missing for {raw_id}")
+                continue
 
-        scraped_at = raw_post.get("scraped_at")
-        if scraped_at != today_str:
-            continue
+            scraped_at = raw_post.get("scraped_at")
+            if scraped_at != today_str:
+                continue
 
-        post_text = raw_post.get("content") or raw_post.get("post_content")
-        if not post_text:
-            print(f"⚠️ Content missing for {raw_id}")
-            continue
+            post_text = raw_post.get("content") or raw_post.get("post_content")
+            if not post_text:
+                print(f"⚠️ Content missing for {raw_id}")
+                continue
 
-        print(f"   Processing {raw_id}...")
+            print(f"   Processing {raw_id}...")
 
-        ai_response_str = generate_ai_summary(post_text)
-        if not ai_response_str:
-            print(f"⚠️ Skipping {raw_id} due to AI error.")
-            continue
+            ai_response_str = generate_ai_summary(post_text)
+            if not ai_response_str:
+                print(f"⚠️ Skipping {raw_id} due to AI error.")
+                continue
 
-        try:
-            ai_response = json.loads(ai_response_str)
-        except json.JSONDecodeError:
-            ai_response = {"raw": ai_response_str}
+            try:
+                ai_response = json.loads(ai_response_str)
+            except json.JSONDecodeError:
+                ai_response = {"raw": ai_response_str}
 
-        summary_doc = {
-            "linked_raw_post_id": raw_id,
-            "intent": ai_response.get("intent"),
-            "role": ai_response.get("role"),
-            "summary_text": ai_response.get("summary"),
-            "personalization": ai_response.get("personalization"),
-            "ai_raw": ai_response,
-            "generated_at": datetime.utcnow(),
-        }
+            summary_doc = {
+                "linked_raw_post_id": raw_id,
+                "intent": ai_response.get("intent"),
+                "role": ai_response.get("role"),
+                "summary_text": ai_response.get("summary"),
+                "personalization": ai_response.get("personalization"),
+                "ai_raw": ai_response,
+                "generated_at": datetime.utcnow(),
+            }
 
-        result = col_summaries.insert_one(summary_doc)
-        new_summary_id = result.inserted_id
+            result = col_summaries.insert_one(summary_doc)
+            new_summary_id = result.inserted_id
 
-        col_final_table.update_one(
-            {"_id": master_id},
-            {
-                "$set": {
-                    "ref_summary": new_summary_id,
-                    "pipeline_status.0": 1,
-                    "updated_at": datetime.utcnow(),
-                }
-            },
-        )
+            col_final_table.update_one(
+                {"_id": master_id},
+                {
+                    "$set": {
+                        "ref_summary": new_summary_id,
+                        "pipeline_status.0": 1,
+                        "updated_at": datetime.utcnow(),
+                    }
+                },
+            )
 
-        print(f"   ✅ Linked Summary {new_summary_id} to Master {master_id}")
-        time.sleep(4)
+            print(f"   ✅ Linked Summary {new_summary_id} to Master {master_id}")
+            time.sleep(4)
+
+        if callback_url:
+            print(f"📞 Calling back n8n at: {callback_url}")
+            requests.post(callback_url, json={"status": "success", "message": "AI Summaries Complete"}, timeout=15)
+    except Exception as exc:
+        print(f"❌ Summarizer Failed: {exc}")
+        if callback_url:
+            requests.post(callback_url, json={"status": "error", "error": str(exc)}, timeout=15)
 
 
 if __name__ == "__main__":

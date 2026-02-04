@@ -1,10 +1,18 @@
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
+import os
+from zoneinfo import ZoneInfo
 
 from src.database import get_raw_posts_collection, get_final_table_collection
 
 
 def sync_raw_to_final():
     print("🔄 Syncing Raw Posts to Final Table...")
+
+    timezone_name = os.getenv("TIMEZONE", "UTC")
+    try:
+        today_str = datetime.now(ZoneInfo(timezone_name)).date().isoformat()
+    except Exception:
+        today_str = date.today().isoformat()
 
     col_raw_posts = get_raw_posts_collection()
     col_final_table = get_final_table_collection()
@@ -17,6 +25,9 @@ def sync_raw_to_final():
         if raw_id is None:
             continue
 
+        if post.get("scraped_at") != today_str:
+            continue
+
         exists = col_final_table.find_one({"ref_raw_post": raw_id})
         if exists:
             continue
@@ -25,7 +36,7 @@ def sync_raw_to_final():
             "ref_raw_post": raw_id,
             "ref_summary": None,
             "ref_contact_info": None,
-            "pipeline_status": [0, 0, 0, 0],
+            "pipeline_status": [0, 0, 0, 0, 0, 0],
             "created_at": datetime.now(timezone.utc),
             "updated_at": datetime.now(timezone.utc),
         }

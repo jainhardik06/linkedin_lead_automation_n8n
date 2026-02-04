@@ -7,11 +7,19 @@ import requests
 from src.scraper import run_selenium_scraper
 from src.orchestrator import sync_raw_to_final
 from src.post_summary import run_summarizer
+from src.post_email import run_email_extractor
+from src.post_mobile import run_mobile_extractor
+from src.deep_scraper import run_deep_scraper
+from src.profile_processor import run_profile_processor
 
 app = FastAPI()
 
 class ScrapeRequest(BaseModel):
     url: str
+    callback_url: str
+
+
+class SummarizerRequest(BaseModel):
     callback_url: str
 
 
@@ -59,12 +67,42 @@ async def run_orchestrator_endpoint():
 
 
 @app.post("/run-summarizer")
-async def run_summarizer_endpoint():
+async def run_summarizer_endpoint(request: SummarizerRequest, background_tasks: BackgroundTasks):
+    background_tasks.add_task(run_summarizer, request.callback_url)
+    return {"status": "started", "message": "AI Summarizer started. Will callback when done."}
+
+
+@app.post("/run-email-extractor")
+async def run_email_extractor_endpoint():
     try:
-        run_summarizer()
-        return {"status": "ok", "message": "Post summary completed"}
+        run_email_extractor()
+        return {"status": "ok", "message": "Post email extraction completed"}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
+
+
+@app.post("/run-mobile-extractor")
+async def run_mobile_extractor_endpoint():
+    try:
+        run_mobile_extractor()
+        return {"status": "ok", "message": "Post mobile extraction completed"}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+
+@app.post("/run-deep-scraper")
+async def run_deep_scraper_endpoint(request: SummarizerRequest, background_tasks: BackgroundTasks):
+    """Phase 4: Deep LinkedIn Profile Scraper with Callback"""
+    background_tasks.add_task(run_deep_scraper, request.callback_url)
+    return {"status": "started", "message": "Deep Scraper running with callback"}
+
+
+@app.post("/run-profile-processor")
+async def run_profile_processor_endpoint(request: SummarizerRequest, background_tasks: BackgroundTasks):
+    """Phase 5: Parse PDFs and Generate AI Summaries with Callback"""
+    background_tasks.add_task(run_profile_processor, request.callback_url)
+    return {"status": "started", "message": "Profile Processor running with callback"}
+
 
 if __name__ == "__main__":
     import uvicorn
