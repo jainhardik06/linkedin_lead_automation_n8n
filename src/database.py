@@ -54,6 +54,9 @@ def get_user_links_collection():
 def get_user_summary_collection():
     return get_collection(os.getenv("USER_SUMMARY_COLLECTION", "user_summary"))
 
+def get_master_leads_collection():
+    return get_collection(os.getenv("MASTER_LEADS_COLLECTION", "master_leads"))
+
 # Backward compatibility for existing code
 def get_db_collection():
     return get_raw_posts_collection()

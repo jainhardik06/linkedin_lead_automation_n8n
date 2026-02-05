@@ -24,7 +24,6 @@ from src.database import (
     get_raw_posts_collection,
     get_user_scrapped_collection,
 )
-from src.drive_upload import upload_pdf_to_drive
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,7 +31,6 @@ logger = logging.getLogger(__name__)
 TEMP_DOWNLOAD_PATH = os.path.join(os.getcwd(), "temp_downloads")
 SELENIUM_TIMEOUT = 10
 CONTACT_WAIT_TIMEOUT = 8
-PDF_WAIT_TIMEOUT = 15
 RATE_LIMIT_DELAY = 30
 PROFILE_LOAD_DELAY = 6
 
@@ -67,7 +65,6 @@ def get_driver():
         "download.default_directory": TEMP_DOWNLOAD_PATH,
         "download.prompt_for_download": False,
         "download.directory_upgrade": True,
-        "plugins.always_open_pdf_externally": True,
     }
     options.add_experimental_option("prefs", prefs)
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
@@ -434,6 +431,55 @@ def extract_company_about(driver):
         return result
     except Exception as exc:
         logger.warning(f"Company About extraction failed: {str(exc)[:100]}")
+        return result
+
+
+def extract_user_about(driver):
+    """Extract user About section text + emails/mobiles/links."""
+    result = {"about_text": "", "emails": [], "mobiles": [], "links": []}
+
+    try:
+        containers = []
+        section_selectors = [
+            "section#about",
+            "section.pv-about-section",
+            "section.pv-profile-section",
+            "section.artdeco-card",
+        ]
+
+        for selector in section_selectors:
+            try:
+                containers.extend(driver.find_elements(By.CSS_SELECTOR, selector))
+            except Exception:
+                pass
+
+        try:
+            containers.extend(driver.find_elements(By.XPATH, "//section[.//h2[contains(., 'About')]]"))
+            containers.extend(driver.find_elements(By.XPATH, "//section[.//h2[contains(., 'Summary')]]"))
+        except Exception:
+            pass
+
+        containers = [c for c in containers if c is not None]
+        if not containers:
+            logger.info("User About section not found")
+            return result
+
+        container = max(containers, key=lambda c: len((c.text or "").strip()))
+        about_text = (container.text or "").strip()
+        about_html = container.get_attribute("innerHTML") or ""
+
+        result["about_text"] = about_text
+        extracted = extract_contact_from_text(about_text, about_html)
+        result["emails"] = extracted.get("emails", [])
+        result["mobiles"] = extracted.get("mobiles", [])
+        result["links"] = extracted.get("links", [])
+
+        logger.info(
+            f"📄 User About: {len(result['about_text'])} chars, {len(result['emails'])} emails, {len(result['mobiles'])} mobiles, {len(result['links'])} links"
+        )
+        return result
+    except Exception as exc:
+        logger.warning(f"User About extraction failed: {str(exc)[:100]}")
         return result
 
 
@@ -874,103 +920,6 @@ def extract_bio_links(driver, profile_type="user"):
         return bio_links
 
 
-def download_pdf_to_drive(driver, profile_type="user"):
-    """Download PDF, Upload to Drive, Delete Local. Returns Drive Link or None."""
-    if profile_type != "user":
-        logger.info("⏭️ Skipping PDF for company profile")
-        return None
-
-    try:
-        driver.execute_script("window.scrollTo(0, 0);")
-        time.sleep(random_delay(1, 0.3))
-
-        def click_js(el):
-            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
-            time.sleep(random_delay(0.4, 0.2))
-            driver.execute_script("arguments[0].click();", el)
-
-        def close_menus():
-            driver.execute_script("document.querySelectorAll('[role=menu]').forEach(m => m.remove());")
-
-        # 1. Click 'More' Button (robust selectors + retries)
-        more_btn = None
-        for attempt in range(3):
-            close_menus()
-            selectors = [
-                "button[aria-label='More actions']",
-                "button[aria-label*='More']",
-                ".top-card-profile-actions__overflow-button",
-                "button[data-test-id='top-card-overflow-menu-trigger']",
-                ".pv-top-card button[aria-label*='More']",
-                ".pv-top-card .artdeco-dropdown__trigger",
-            ]
-            for selector in selectors:
-                elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                if elements:
-                    more_btn = elements[0]
-                    break
-            if more_btn:
-                try:
-                    click_js(more_btn)
-                    logger.info("Clicked More actions button")
-                    time.sleep(random_delay(1, 0.4))
-                    break
-                except Exception:
-                    more_btn = None
-            time.sleep(random_delay(0.6, 0.2))
-
-        if not more_btn:
-            logger.warning("More actions button not found")
-            return None
-
-        # 2. Click 'Save to PDF'
-        try:
-            save_pdf = WebDriverWait(driver, 6).until(
-                EC.element_to_be_clickable((By.XPATH, "//div[contains(text(), 'Save to PDF')] | //span[contains(text(), 'Save to PDF')] | //a[contains(text(), 'Save to PDF')]"))
-            )
-            click_js(save_pdf)
-            logger.info("Clicked Save to PDF")
-        except:
-            logger.warning("Save to PDF option not found")
-            return None
-        
-        # 3. Wait for Download
-        logger.info("Waiting for PDF download...")
-        time.sleep(PDF_WAIT_TIMEOUT)
-
-        # 4. Find File
-        pdf_files = glob.glob(os.path.join(TEMP_DOWNLOAD_PATH, "*.pdf"))
-        if not pdf_files:
-            logger.warning("No PDF file downloaded")
-            return None
-            
-        latest_pdf = max(pdf_files, key=os.path.getctime)
-        filename = os.path.basename(latest_pdf)
-        
-        logger.info(f"Found PDF: {filename}")
-        
-        # 5. Upload & Get Link (upload_pdf_to_drive handles cleanup)
-        link = upload_pdf_to_drive(latest_pdf, filename)
-        
-        # Double-check cleanup
-        if os.path.exists(latest_pdf):
-            try:
-                os.remove(latest_pdf)
-            except:
-                pass
-            
-        return link
-
-    except Exception as e:
-        logger.warning(
-            "PDF Download skipped: %s: %s",
-            type(e).__name__,
-            str(e)[:120],
-            exc_info=True,
-        )
-        return None
-
-
 def run_deep_scraper(callback_url: str = None):
     """Main scraper loop with comprehensive error handling."""
     print("🕵️‍♂️ Starting Deep Profile Scraper...")
@@ -1075,15 +1024,19 @@ def run_deep_scraper(callback_url: str = None):
                     c_about_text = about_data.get("about_text", "")
                     time.sleep(random_delay(0.8, 0.2))
                 else:
-                    contact_data = scrape_contact_info(driver, profile_type=p_type)
-                    time.sleep(random_delay(1, 0.3))
+                    # User: match company flow by extracting About section text + contacts
+                    about_data = extract_user_about(driver)
+                    contact_data = {
+                        "emails": about_data.get("emails", []),
+                        "mobiles": about_data.get("mobiles", []),
+                        "links": about_data.get("links", []),
+                    }
+                    c_about_text = about_data.get("about_text", "")
+                    time.sleep(random_delay(0.8, 0.2))
 
                     # Extract bio links (custom buttons like "View my portfolio")
                     bio_links = extract_bio_links(driver, profile_type=p_type)
                     time.sleep(random_delay(0.8, 0.2))
-
-                pdf_link = download_pdf_to_drive(driver, profile_type=p_type)
-                time.sleep(random_delay(1, 0.2))
 
                 # Save to DB
                 user_doc = {
@@ -1095,7 +1048,6 @@ def run_deep_scraper(callback_url: str = None):
                     "contact_links": contact_data.get("links", []),
                     "bio_links": bio_links,  # NEW: Custom profile buttons
                     "c_about_text": c_about_text,
-                    "contact_pdf_link": pdf_link,
                     "scraped_at": datetime.now(timezone.utc),
                 }
                 res = col_user_scrapped.insert_one(user_doc)

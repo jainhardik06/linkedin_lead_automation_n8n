@@ -1,16 +1,10 @@
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 import os
-
 import requests
 
-from src.scraper import run_selenium_scraper
-from src.orchestrator import sync_raw_to_final
-from src.post_summary import run_summarizer
-from src.post_email import run_email_extractor
-from src.post_mobile import run_mobile_extractor
-from src.deep_scraper import run_deep_scraper
-from src.profile_processor import run_profile_processor
+# ⚠️ NOTE: Imports are DEFERRED to endpoint functions to avoid MongoDB connection at startup
+# If server fails to start, check network connectivity and MongoDB URI in .env
 
 app = FastAPI()
 
@@ -25,6 +19,7 @@ class SummarizerRequest(BaseModel):
 
 def background_scrape_task(search_url: str, callback_url: str):
     try:
+        from src.scraper import run_selenium_scraper
         print(f"🚀 Background Scrape Started for: {search_url}")
         print(f"📍 Callback URL registered: {callback_url}")
         run_selenium_scraper(search_url)
@@ -60,6 +55,7 @@ async def start_scrape_endpoint(request: ScrapeRequest, background_tasks: Backgr
 @app.post("/run-orchestrator")
 async def run_orchestrator_endpoint():
     try:
+        from src.orchestrator import sync_raw_to_final
         sync_raw_to_final()
         return {"status": "ok", "message": "Orchestrator Sync Complete"}
     except Exception as exc:
@@ -68,6 +64,7 @@ async def run_orchestrator_endpoint():
 
 @app.post("/run-summarizer")
 async def run_summarizer_endpoint(request: SummarizerRequest, background_tasks: BackgroundTasks):
+    from src.post_summary import run_summarizer
     background_tasks.add_task(run_summarizer, request.callback_url)
     return {"status": "started", "message": "AI Summarizer started. Will callback when done."}
 
@@ -75,6 +72,7 @@ async def run_summarizer_endpoint(request: SummarizerRequest, background_tasks: 
 @app.post("/run-email-extractor")
 async def run_email_extractor_endpoint():
     try:
+        from src.post_email import run_email_extractor
         run_email_extractor()
         return {"status": "ok", "message": "Post email extraction completed"}
     except Exception as exc:
@@ -84,6 +82,7 @@ async def run_email_extractor_endpoint():
 @app.post("/run-mobile-extractor")
 async def run_mobile_extractor_endpoint():
     try:
+        from src.post_mobile import run_mobile_extractor
         run_mobile_extractor()
         return {"status": "ok", "message": "Post mobile extraction completed"}
     except Exception as exc:
@@ -93,6 +92,7 @@ async def run_mobile_extractor_endpoint():
 @app.post("/run-deep-scraper")
 async def run_deep_scraper_endpoint(request: SummarizerRequest, background_tasks: BackgroundTasks):
     """Phase 4: Deep LinkedIn Profile Scraper with Callback"""
+    from src.deep_scraper import run_deep_scraper
     background_tasks.add_task(run_deep_scraper, request.callback_url)
     return {"status": "started", "message": "Deep Scraper running with callback"}
 
@@ -100,8 +100,25 @@ async def run_deep_scraper_endpoint(request: SummarizerRequest, background_tasks
 @app.post("/run-profile-processor")
 async def run_profile_processor_endpoint(request: SummarizerRequest, background_tasks: BackgroundTasks):
     """Phase 5: Parse PDFs and Generate AI Summaries with Callback"""
+    from src.profile_processor import run_profile_processor
     background_tasks.add_task(run_profile_processor, request.callback_url)
     return {"status": "started", "message": "Profile Processor running with callback"}
+
+
+@app.post("/run-lead-aggregator")
+async def run_lead_aggregator_endpoint(request: SummarizerRequest, background_tasks: BackgroundTasks):
+    """Phase 6: Consolidate all emails into Master Table with context"""
+    from src.lead_aggregator import run_lead_aggregator
+    background_tasks.add_task(run_lead_aggregator, request.callback_url)
+    return {"status": "started", "message": "Lead Aggregator running with callback"}
+
+
+@app.post("/run-email-sender")
+async def run_email_sender_endpoint(request: SummarizerRequest, background_tasks: BackgroundTasks):
+    """Phase 10: Send Generated Emails via Hostinger SMTP"""
+    from src.email_sender import run_email_sender
+    background_tasks.add_task(run_email_sender, request.callback_url)
+    return {"status": "started", "message": "Email Sender running with callback"}
 
 
 if __name__ == "__main__":

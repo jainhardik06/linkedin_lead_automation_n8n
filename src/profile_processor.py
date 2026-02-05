@@ -1,11 +1,9 @@
 import os
 import re
-import io
 import time
 import logging
 import requests
 from datetime import datetime, timezone
-import pdfplumber
 from groq import Groq
 from src.database import (
     get_final_table_collection,
@@ -15,7 +13,6 @@ from src.database import (
     get_user_links_collection,
     get_user_summary_collection,
 )
-from src.drive_upload import download_file_content
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,18 +20,13 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+# Disable Groq's automatic retry mechanism - we handle retries ourselves
+client = Groq(api_key=os.getenv("GROQ_API_KEY"), max_retries=0)
 
-
-def extract_text_from_pdf_bytes(pdf_bytes):
-    """Converts PDF binary data to String."""
-    try:
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            text = "\n".join([page.extract_text() or "" for page in pdf.pages])
-        return text
-    except Exception as e:
-        logger.warning(f"⚠️ PDF Read Error: {e}")
-        return ""
+# Rate limiting: Groq has 30 RPM free tier
+# Using 3s minimum interval = 20 RPM (safe buffer below limit)
+GROQ_MIN_INTERVAL = 5.0
+last_request_time = 0
 
 
 def regex_extractor(text):
@@ -67,9 +59,17 @@ def regex_extractor(text):
 
 
 def generate_ai_profile_summary(text, profile_type):
-    """Uses Groq to summarize the profile with rate limiting."""
-    # Truncate to fit within token limits (llama-3.3-70b can handle more)
-    # Approximate: 1 token ≈ 4 chars, limit to ~8000 chars for safety
+    """Uses Groq to summarize the profile with rate limiting and model fallback."""
+    global last_request_time
+    
+    # Enforce minimum interval between requests
+    elapsed = time.time() - last_request_time
+    if elapsed < GROQ_MIN_INTERVAL:
+        wait_time = GROQ_MIN_INTERVAL - elapsed
+        logger.info(f"   ⏳ Rate limiting: waiting {wait_time:.1f}s...")
+        time.sleep(wait_time)
+    
+    # Truncate to fit within token limits
     max_chars = 8000
     truncated_text = text[:max_chars] if len(text) > max_chars else text
     
@@ -80,17 +80,56 @@ def generate_ai_profile_summary(text, profile_type):
     
     TEXT: {truncated_text}
     """
-    try:
-        # Using llama-3.3-70b-versatile: 30 RPM, 1K RPD, 12K TPM, 100K TPD
-        completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.05,
-        )
-        return completion.choices[0].message.content
-    except Exception as e:
-        logger.error(f"❌ AI Error: {e}")
-        return "Summary generation failed."
+    
+    # Model fallback chain (same as lead_aggregator.py - verified working)
+    models = [
+        "llama-3.1-8b-instant",           # Primary: fast & cheap
+        "qwen/qwen3-32b",                 # Fallback 2: alternative
+        "moonshotai/kimi-k2-instruct",    # Fallback 3: last resort
+        "llama-3.3-70b-versatile",        # Fallback 1: better quality
+    ]
+    
+    for model in models:
+        max_retries = 2
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                last_request_time = time.time()
+                completion = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.05,
+                )
+                return completion.choices[0].message.content
+            except Exception as e:
+                error_msg = str(e)
+                if "429" in error_msg or "Too Many Requests" in error_msg:
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        # Exponential backoff: 5s, 10s
+                        wait_time = 5 * (2 ** (retry_count - 1))
+                        logger.warning(f"   ⚠️ 429 on {model}, retry {retry_count}/{max_retries} in {wait_time}s...")
+                        time.sleep(wait_time)
+                    else:
+                        logger.warning(f"   ⚠️ {model} maxed out on retries, trying next model...")
+                        break  # Exit while loop, try next model
+                elif "decommissioned" in error_msg.lower() or "no longer supported" in error_msg.lower():
+                    logger.warning(f"   ⚠️ {model} is decommissioned, trying next model...")
+                    break
+                elif "timeout" in error_msg.lower():
+                    logger.warning(f"   ⚠️ Timeout on {model}, trying next...")
+                    break
+                else:
+                    logger.warning(f"   ⚠️ {model} error: {e}")
+                    break
+        
+        # If we didn't return, we move to next model
+        if model == models[-1]:  # Last model exhausted
+            logger.error(f"❌ All models failed. Skipping profile.")
+            return "Unable to generate summary - all models rate limited."
+    
+    return "Summary generation failed."
 
 
 def run_profile_processor(callback_url: str = None):
@@ -144,13 +183,6 @@ def run_profile_processor(callback_url: str = None):
     if not pending_profiles:
         print("   No profiles to process.")
         return
-
-    # Rate limiting setup
-    # llama-3.3-70b-versatile: 30 RPM, 1K RPD
-    # Safe rate: 1 request every 3 seconds = 20 RPM (leaving buffer)
-    rate_limit_delay = 3.0
-    request_count = 0
-    start_time = time.time()
     
     processed_count = 0
 
@@ -163,21 +195,11 @@ def run_profile_processor(callback_url: str = None):
         final_text = ""
 
         # --- 1. GET CONTENT ---
+        final_text = user_data.get("c_about_text", "")
         if p_type == "company":
-            final_text = user_data.get("c_about_text", "")
             print(f"   🏢 Processing Company: {profile_name}")
         else:
-            # User Profile -> Try PDF
-            pdf_link = user_data.get("contact_pdf_link")
-            if pdf_link:
-                print(f"   👤 Processing User: {profile_name}")
-                pdf_bytes = download_file_content(pdf_link)
-                if pdf_bytes:
-                    final_text = extract_text_from_pdf_bytes(pdf_bytes)
-                else:
-                    logger.warning("   ⚠️ Could not download PDF.")
-            else:
-                logger.warning("   ⚠️ No PDF Link found.")
+            print(f"   👤 Processing User: {profile_name}")
 
         if not final_text:
             final_text = "No content available."
@@ -191,16 +213,6 @@ def run_profile_processor(callback_url: str = None):
         # --- 3. AI SUMMARY ---
         ai_summary = generate_ai_profile_summary(final_text, p_type)
         logger.info(f"   🤖 AI Summary: {ai_summary[:60]}...")
-        
-        # Rate limiting: Enforce delay between requests
-        request_count += 1
-        elapsed = time.time() - start_time
-        expected_time = request_count * rate_limit_delay
-        
-        if elapsed < expected_time:
-            sleep_time = expected_time - elapsed
-            logger.info(f"   ⏳ Rate limiting: waiting {sleep_time:.1f}s...")
-            time.sleep(sleep_time)
 
         # --- 4. SAVE TO DB (The 4 Tables) ---
         ts = datetime.now(timezone.utc)
