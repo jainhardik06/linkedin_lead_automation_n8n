@@ -5,7 +5,8 @@ import time
 import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
+from zoneinfo import ZoneInfo
 from src.database import get_master_leads_collection
 from dotenv import load_dotenv
 import logging
@@ -417,6 +418,12 @@ def run_email_sender(callback_url: str = None):
         logger.error("❌ SMTP_EMAIL or SMTP_PASSWORD not configured in .env")
         return 0
 
+    timezone_name = os.getenv("TIMEZONE", "UTC")
+    try:
+        today_str = datetime.now(ZoneInfo(timezone_name)).date().isoformat()
+    except Exception:
+        today_str = date.today().isoformat()
+
     # Connect to MongoDB
     col_master_leads = get_master_leads_collection()
 
@@ -424,7 +431,8 @@ def run_email_sender(callback_url: str = None):
     pending_leads = list(col_master_leads.find({
         "generated_subject": {"$exists": True},
         "generated_body": {"$exists": True},
-        "status": {"$ne": "sent"}
+        "status": {"$ne": "sent"},
+        "lead_date": today_str
     }).limit(BATCH_SIZE))
 
     print(f"   📧 Found {len(pending_leads)} leads ready to send (batch size: {BATCH_SIZE})...")

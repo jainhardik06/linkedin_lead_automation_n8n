@@ -395,10 +395,10 @@ def upsert_lead(email, context, source_type, master_id):
         
         if result.upserted_id:
             logger.info(f"   ✅ NEW: {email_clean} ({source_type})")
-        else:
-            logger.debug(f"   🔄 UPDATED: {email_clean} ({source_type})")
-        
-        return True
+            return True
+
+        logger.debug(f"   🔄 DUPLICATE (same day): {email_clean} ({source_type})")
+        return False
     except Exception as e:
         logger.warning(f"   ⚠️ Error saving {email_clean}: {e}")
         return False
@@ -423,6 +423,10 @@ def run_lead_aggregator(callback_url: str = None):
     col_user_mail = get_user_mail_collection()
     col_user_scrapped = get_user_scrapped_collection()
     col_raw_posts = get_raw_posts_collection()
+    today_str = get_today_str()
+    today_raw_ids = {
+        doc["_id"] for doc in col_raw_posts.find({"scraped_at": today_str}, {"_id": 1})
+    }
     
     # Setup unique index on email
     setup_indexes()
@@ -433,8 +437,10 @@ def run_lead_aggregator(callback_url: str = None):
 
     # --- SOURCE 1: POST EMAILS (Iterate directly through collection) ---
     print("\n📧 Scanning POST EMAILS table...")
-    post_emails_docs = list(col_post_emails.find({}))
-    print(f"   Found {len(post_emails_docs)} post_emails documents")
+    post_emails_docs = list(
+        col_post_emails.find({"linked_raw_post_id": {"$in": list(today_raw_ids)}})
+    )
+    print(f"   Found {len(post_emails_docs)} post_emails documents (today only)")
     
     for doc in post_emails_docs:
         if not doc.get("emails"):
@@ -445,6 +451,8 @@ def run_lead_aggregator(callback_url: str = None):
         final_entry = None
         
         if linked_raw_post_id:
+            if linked_raw_post_id not in today_raw_ids:
+                continue
             final_entry = col_final_table.find_one({"ref_raw_post": linked_raw_post_id})
         
         if not final_entry:
@@ -463,8 +471,10 @@ def run_lead_aggregator(callback_url: str = None):
 
     # --- SOURCE 2: USER MAILS (Iterate directly through collection) ---
     print("\n📧 Scanning USER MAIL table...")
-    user_mail_docs = list(col_user_mail.find({}))
-    print(f"   Found {len(user_mail_docs)} user_mail documents")
+    user_mail_docs = list(
+        col_user_mail.find({"linked_raw_post_id": {"$in": list(today_raw_ids)}})
+    )
+    print(f"   Found {len(user_mail_docs)} user_mail documents (today only)")
     
     for doc in user_mail_docs:
         if not doc.get("emails"):
@@ -475,6 +485,8 @@ def run_lead_aggregator(callback_url: str = None):
         final_entry = None
         
         if linked_raw_post_id:
+            if linked_raw_post_id not in today_raw_ids:
+                continue
             final_entry = col_final_table.find_one({"ref_raw_post": linked_raw_post_id})
         
         if not final_entry:
@@ -493,8 +505,10 @@ def run_lead_aggregator(callback_url: str = None):
 
     # --- SOURCE 3: USER SCRAPPED (Iterate directly through collection) ---
     print("\n📧 Scanning USER SCRAPPED table...")
-    user_scrapped_docs = list(col_user_scrapped.find({}))
-    print(f"   Found {len(user_scrapped_docs)} user_scrapped documents")
+    user_scrapped_docs = list(
+        col_user_scrapped.find({"linked_raw_post_id": {"$in": list(today_raw_ids)}})
+    )
+    print(f"   Found {len(user_scrapped_docs)} user_scrapped documents (today only)")
     
     for doc in user_scrapped_docs:
         if not doc.get("contact_email"):
@@ -505,6 +519,10 @@ def run_lead_aggregator(callback_url: str = None):
         
         if not final_entry:
             logger.debug(f"⚠️ Could not link user_scrapped doc {doc.get('_id')} to final_table")
+            continue
+
+        raw_id = final_entry.get("ref_raw_post")
+        if raw_id not in today_raw_ids:
             continue
         
         context = get_context_data(final_entry)

@@ -6,7 +6,8 @@ import time
 import random
 import urllib.parse
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
+from zoneinfo import ZoneInfo
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -929,6 +930,11 @@ def run_deep_scraper(callback_url: str = None):
         logger.info(f"📍 Callback URL registered: {callback_url}")
     
     ensure_temp_folder()
+    timezone_name = os.getenv("TIMEZONE", "UTC")
+    try:
+        today_str = datetime.now(ZoneInfo(timezone_name)).date().isoformat()
+    except Exception:
+        today_str = date.today().isoformat()
     col_raw_posts = get_raw_posts_collection()
     col_user_scrapped = get_user_scrapped_collection()
     col_final_table = get_final_table_collection()
@@ -975,6 +981,9 @@ def run_deep_scraper(callback_url: str = None):
                 raw_post = col_raw_posts.find_one({"_id": raw_id})
                 if not raw_post:
                     logger.warning(f"Raw post not found for {raw_id}")
+                    continue
+
+                if raw_post.get("scraped_at") != today_str:
                     continue
 
                 # Get Profile URL
